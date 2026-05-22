@@ -25,8 +25,6 @@ import java.util.Map;
 public class WebSocketConfig implements WebFluxConfigurer {
     @Autowired
     private JwtUtil jwtUtil;
-    @Value("${allowed.origins}")
-    private List<String> allowedOrigins;
 
     @Autowired
     private RedisService redisService;
