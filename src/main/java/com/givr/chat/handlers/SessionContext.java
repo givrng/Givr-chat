@@ -67,7 +67,8 @@ public class SessionContext {
     public void addGroupMsgPointer(Long projectId, String pointer){
         if(pointer==null)
             return;
-        group_pointers.put(String.valueOf(projectId), pointer);
+
+        group_pointers.putIfAbsent(String.valueOf(projectId), pointer);
     }
 
     public String getGroupMsgPointer(Long projectId){

@@ -12,6 +12,7 @@ import org.springframework.web.reactive.socket.WebSocketMessage;
 import org.springframework.web.reactive.socket.WebSocketSession;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
 import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
@@ -37,7 +38,7 @@ public class GivrSocketHandler implements WebSocketHandler {
         return session.receive()
                 .map(WebSocketMessage::getPayloadAsText)
                 .flatMap(payload-> processPayload(payload, session))
-                .doFinally((signalType)-> cleanUpSocket(session))
+                .doOnTerminate(()->cleanUpSocket(session))
                 .then();
     }
 
@@ -111,6 +112,7 @@ public class GivrSocketHandler implements WebSocketHandler {
         System.out.println(activeUsers.get(projectId).size());
         Mono<Void> publishMessage = redisService.publishMessage(context, msg)
                 .then( Mono.defer(()->Flux.fromIterable(members)
+                        .filter(sessionContext -> sessionContext.getSession().isOpen())
                         .flatMap(member-> member.send(serialize(msg.getPayload())))
                         .doOnNext(System.err::println)
                         .then()));
@@ -120,6 +122,7 @@ public class GivrSocketHandler implements WebSocketHandler {
         Mono<Void> publishUnreadCount = Flux.fromIterable(inactiveUser.get(projectId).values())
                 .doOnNext(ses->ses.increaseUnreadCount(projectId))
                 .doOnNext(ses->ses.addGroupMsgPointer(projectId, msg.getPayload().getMsgId()))
+                .filter(sessionContext -> sessionContext.getSession().isOpen())
                 .flatMap(ses->ses.sendUnreadCount(projectId))
                 .doOnError(System.err::println)
                 .then();
@@ -152,7 +155,8 @@ public class GivrSocketHandler implements WebSocketHandler {
 
             sessionContext.addGroupMsgPointer(projectId, "");
             sessionContext.resetUnreadCount(projectId);
-
+            sessionContext.addGroupMsgPointer(projectId, null);
+            redisService.writeUserProjectPointers(sessionContext, sessionContext.getGroup_pointers());
             activeUsers.get(projectId).put(session.getId(), sessionContext);
             inactiveUser.get(projectId).remove(session.getId());
             return null;
@@ -169,13 +173,14 @@ public class GivrSocketHandler implements WebSocketHandler {
                 return null;
             }
             SessionContext sessionContext = sessionContextMap.get(session.getId());
-
             if(sessionContext == null) {
                 deny(session, projectId);
                 return null;
             }
 
             inactiveUser.get(projectId).put(session.getId(), sessionContext);
+            sessionContext.addGroupMsgPointer(projectId, RedisService.getMessageOffset(projectId));
+            redisService.writeUserProjectPointers(sessionContext, sessionContext.getGroup_pointers());
 
             activeUsers.get(projectId).remove(session.getId());
             return null;
@@ -184,7 +189,6 @@ public class GivrSocketHandler implements WebSocketHandler {
 
     public Mono<Void> handleConnected(WebSocketSession session){
         SessionContext sessionContext = createContext(session);
-        System.out.println("Session created "+sessionContext.getUserId());
         return redisService.getUserProjects(sessionContext.getUserId())
                 .doOnNext(projectId->{
                     sessionContext.getJoinedProjects().add(projectId);
@@ -214,11 +218,7 @@ public class GivrSocketHandler implements WebSocketHandler {
         System.out.println("Clean up has ended");
     }
 
-    private SessionContext removeSession(
-            Map<Long, Map<String, SessionContext>> source,
-            WebSocketSession session,
-            boolean updateOffset
-    ) {
+    private SessionContext removeSession(Map<Long, Map<String, SessionContext>> source, WebSocketSession session, boolean updateOffset) {
 
         for (Map.Entry<Long, Map<String, SessionContext>> entry : source.entrySet()) {
 
